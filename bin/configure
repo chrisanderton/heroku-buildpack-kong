@@ -1,0 +1,11 @@
+#!/bin/bash
+
+erb /app/conf/kong.admin.yml.erb > /app/conf/kong.admin.yml
+erb /app/conf/kong.api.yml.erb > /app/conf/kong.api.yml
+
+if [ ! -z $KONG_ADMIN ]; then
+  ln -f -s /app/conf/kong.admin.yml /app/conf/kong.yml
+else
+  ln -f -s /app/conf/kong.api.yml /app/conf/kong.yml
+fi
+

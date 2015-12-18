@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# bin/compile <build-dir> <cache-dir>
+
+# Code to handle Apt is from https://github.com/ddollar/heroku-buildpack-apt
+
+# fail fast
+set -e
+
+# debug
+#set -x
+
+# parse and derive params
+BUILD_DIR=$1
+CACHE_DIR=$2
+LP_DIR=`cd $(dirname $0); cd ..; pwd`
+
+BIN_DIR=$(cd $(dirname $0); pwd) # absolute path
+ROOT_DIR=$(dirname $BIN_DIR)
+ENV_DIR=$3
+
+KONG_URL="https://downloadkong.org/trusty_all.deb"
+
+function error() {
+  echo " !     $*" >&2
+  exit 1
+}
+
+function topic() {
+  echo "-----> $*"
+}
+
+function indent() {
+  c='s/^/       /'
+  case $(uname) in
+    Darwin) sed -l "$c";;
+    *)      sed -u "$c";;
+  esac
+}
+
+APT_CACHE_DIR="$CACHE_DIR/apt/cache"
+APT_STATE_DIR="$CACHE_DIR/apt/state"
+
+mkdir -p "$APT_CACHE_DIR/archives/partial"
+mkdir -p "$APT_STATE_DIR/lists/partial"
+
+APT_OPTIONS="-o debug::nolocking=true -o dir::cache=$APT_CACHE_DIR -o dir::state=$APT_STATE_DIR"
+
+topic "Updating apt caches"
+apt-get $APT_OPTIONS update | indent
+
+for PACKAGE in dnsmasq lua5.1 luajit; do
+  if [[ $PACKAGE == *deb ]]; then
+    PACKAGE_NAME=$(basename $PACKAGE .deb)
+    PACKAGE_FILE=$APT_CACHE_DIR/archives/$PACKAGE_NAME.deb
+
+    topic "Fetching $PACKAGE"
+    curl -s -L -z $PACKAGE_FILE -o $PACKAGE_FILE $PACKAGE 2>&1 | indent
+  else
+    topic "Fetching .debs for $PACKAGE"
+    apt-get $APT_OPTIONS -y --force-yes -d install --reinstall $PACKAGE | indent
+  fi
+done
+
+topic "Fetching Kong"
+curl -s -L -o $APT_CACHE_DIR/archives/kong.deb $KONG_URL 2>&1 | indent
+
+mkdir -p $BUILD_DIR/.apt
+
+for DEB in $(ls -1 $APT_CACHE_DIR/archives/*.deb); do
+  topic "Installing $(basename $DEB)"
+  dpkg -x $DEB $BUILD_DIR/.apt/
+done
+
+topic "Update kong paths"
+sed -i s,/usr,/app/.apt/usr,g $BUILD_DIR/.apt/usr/local/bin/kong
+
+topic "Update luarocks paths"
+sed -i s,/usr/local/bin,/app/.apt/usr/bin,g $BUILD_DIR/.apt/usr/local/bin/luarocks
+sed -i s,/usr/local/share/lua/5.1,/app/.apt/usr/local/share/lua/5.1,g $BUILD_DIR/.apt/usr/local/bin/luarocks
+mkdir $BUILD_DIR/.luarocks
+cp $ROOT_DIR/opt/config-5.1.lua $BUILD_DIR/.luarocks
+
+topic "Writing profile script"
+mkdir -p $BUILD_DIR/.profile.d
+cat <<EOF >$BUILD_DIR/.profile.d/000_apt.sh
+export PATH="\$HOME/.apt/usr/bin:\$HOME/.apt/usr/sbin:\$HOME/.apt/usr/local/bin:\$HOME/.apt/usr/local/openresty/nginx/sbin:\$PATH"
+export LD_LIBRARY_PATH="\$HOME/.apt/usr/local/lib:\$HOME/.apt/usr/lib/x86_64-linux-gnu:\$LD_LIBRARY_PATH"
+export LIBRARY_PATH="\$HOME/.apt/usr/local/lib:\$HOME/.apt/usr/lib/x86_64-linux-gnu:\$LIBRARY_PATH"
+export INCLUDE_PATH="\$HOME/.apt/usr/local/include:\$INCLUDE_PATH"
+export CPATH="\$INCLUDE_PATH"
+export CPPPATH="\$INCLUDE_PATH"
+export PKG_CONFIG_PATH="\$HOME/.apt/usr/local/lib/pkgconfig:\$PKG_CONFIG_PATH"
+EOF
+
+export PATH="$HOME/.apt/usr/bin:$HOME/.apt/usr/sbin:$HOME/.apt/usr/local/bin:$HOME/.apt/usr/local/openresty/nginx/sbin:$PATH"
+export LD_LIBRARY_PATH="$HOME/.apt/usr/local/lib:$HOME/.apt/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+export LIBRARY_PATH="$HOME/.apt/usr/local/lib:$HOME/.apt/usr/lib/x86_64-linux-gnu:$LIBRARY_PATH"
+export INCLUDE_PATH="$HOME/.apt/usr/local/include:$INCLUDE_PATH"
+export CPATH="$INCLUDE_PATH"
+export CPPPATH="$INCLUDE_PATH"
+export PKG_CONFIG_PATH="$HOME/.apt/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
+
+topic "Setup config files"
+mkdir -p $BUILD_DIR/conf
+cp $ROOT_DIR/opt/*.erb $BUILD_DIR/conf
+
+topic "Copy configuration script"
+cp $ROOT_DIR/bin/configure $BUILD_DIR/configure
+chmod +x $BUILD_DIR/configure
+
+topic "Setup nginx logging"
+mkdir -p $BUILD_DIR/logs/nginx
+touch $BUILD_DIR/logs/nginx/access.log $BUILD_DIR/logs/nginx/error.log
+
+#give environment to later buildpacks
+export | grep -E -e ' (PATH|LD_LIBRARY_PATH|LIBRARY_PATH|INCLUDE_PATH|CPATH|CPPPATH|PKG_CONFIG_PATH)='  > "$LP_DIR/export"
+
+if [ ! -f $BUILD_DIR/Procfile ]; then
+  topic "Define Procfile"
+  echo "web: /app/configure && /app/.apt/usr/local/bin/kong start -c /app/conf/kong.yml" > $BUILD_DIR/Procfile
+fi
