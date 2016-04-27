@@ -1,3 +1,5 @@
+*Deprecated:* Use [this instead](https://github.com/heroku/heroku-buildpack-kong)
+
 # heroku-buildpack-kong
 
 Experimental buildpack for running Kong on Heroku. **Do not use in Production**!
